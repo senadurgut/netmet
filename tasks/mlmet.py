@@ -194,7 +194,7 @@ class MLTraining(MLTrainingTask):
         return model
 
     def get_data(self, dataset=None, output_y=True, output_df=False, nfiles=-1, min_puppi_pt=-1,
-            remove_saturated=False, useEmu=None):
+            remove_saturated=False, useEmu=None, remove_methf = False, sort_jets = False, compute_mjjj=False):
         import utils.tools as tools
 
         if not dataset:
@@ -230,8 +230,20 @@ class MLTraining(MLTrainingTask):
 
             if remove_saturated:
                 df, puppiMET_noMu = tools.remove_saturated(df, puppiMET_noMu)
-
             return df.copy(), puppiMETNoMu_df.copy()
+
+            if remove_methf:
+                df, puppiMET_noMu = tools.remove_methf(df, puppiMET_noMu)
+            return df.copy(), puppiMETNoMu_df.copy()
+
+            if sort_jets:
+                df, puppiMET_noMu = tools.sort_jets(df, puppiMET_noMu)
+            return df.copy(), puppiMETNoMu_df.copy()
+            
+            if compute_mjjj:
+                df, puppiMET_noMu = tools.compute_mjjj(df, puppiMET_noMu)
+            return df.copy(), puppiMETNoMu_df.copy()
+
         else:
             collections = tools.getCollections(data, inputSums, inputs)
             df = tools.makeDataframe(collections, None, nObj, keepStruct)
@@ -247,9 +259,12 @@ class MLTraining(MLTrainingTask):
         trainFrac = feature_params.get("trainFrac", 0.5)
         min_puppi_pt = feature_params.get("min_puppi_pt", -1)
         remove_saturated = feature_params.get("remove_saturated", False)
+        remove_methf = feature_params.get("remove_methf", True)
+        sort_jets = feature_params.get("sort_jets", False)
+        compute_mjjj = feature_params.get("compute_mjjj", False)
 
         # X, Y = self.get_data(nfiles=-1, min_puppi_pt=min_puppi_pt)
-        X, Y = self.get_data(nfiles=200, min_puppi_pt=min_puppi_pt, remove_saturated=remove_saturated)
+        X, Y = self.get_data(nfiles=200, min_puppi_pt=min_puppi_pt, remove_saturated=remove_saturated, compute_mjjj = compute_mjjj)
 
         scaler = StandardScaler()
         if scaleData:
@@ -280,6 +295,7 @@ class MLTraining(MLTrainingTask):
             plt.xlabel('Epoch')
             plt.legend()
             plt.savefig(create_file_dir(self.output()["acc"].path))
+            print(create_file_dir(self.output()["loss"].path))
 
 
 
@@ -592,8 +608,12 @@ class MLValidation(BaseValidationTask, MLTraining):
         scaleData = feature_params.get("scaleData", False)
         trainFrac = feature_params.get("trainFrac", 0.5)
         remove_saturated = feature_params.get("remove_saturated", False)
+        remove_methf = feature_params.get("remove_methf", False)
+        sort_jets = feature_params.get("sort_jets", False)
+        compute_mjjj = feature_params.get("compute_mjjj", True)
 
-        X, Y = self.get_data(nfiles=200, remove_saturated=remove_saturated)
+        X, Y = self.get_data(nfiles=200, remove_saturated=remove_saturated, remove_methf = remove_methf, 
+        sort_jets = sort_jets, compute_mjjj = compute_mjjj)
 
         scaler = StandardScaler()
         if scaleData:

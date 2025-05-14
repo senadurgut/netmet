@@ -23,6 +23,7 @@ import luigi
 
 from analysis_tools.utils import join_root_selection as jrs
 from analysis_tools.utils import import_root, create_file_dir
+import utils.tools as tools
 
 from cmt.base_tasks.base import (
     Task, ConfigTask, InputData, HTCondorWorkflow, SGEWorkflow, SlurmWorkflow
@@ -57,8 +58,8 @@ class MLTrainingTask(ConfigTask):
         "initialization, 0 means non-deterministic, default: 1")
     min_feature_score = luigi.FloatParameter(default=law.NO_FLOAT, description="minimum score "
         "for filtering used features, requires the FeatureRanking when not empty, default: empty")
-    signal_dataset_name = luigi.Parameter(default="signal", description="name of the signal dataset, "
-        "default: signal")
+    signal_dataset_name = luigi.Parameter(default="signal_nopum_new", description="name of the signal dataset, "
+        "default: signal_nopum_new")
 
     training_id = luigi.IntParameter(default=law.NO_INT, description="when given, overwrite "
         "training parameters from the training with this branch in the training_workflow_file, "
@@ -67,6 +68,7 @@ class MLTrainingTask(ConfigTask):
         default="hyperopt")
     use_gpu = luigi.BoolParameter(default=False, significant=False, description="whether to launch "
         "jobs to a gpu, default: False")
+    #compute_mjjjj = luigi.BoolParameter(default=False, description = 'whether to compute the invariant mass of four jets, default: False')
 
     training_hash_params = [
         "feature_tag", "architecture",
@@ -134,6 +136,8 @@ class MLTrainingTask(ConfigTask):
             feature for feature in self.config.features
             if feature.has_tag(self.feature_tag)
         ]
+        self.training_features.append('m_jjjj_sq')
+
 
         # compute the storage hash
         self.training_hash = self.create_training_hash(**self.get_training_hash_data())
@@ -194,7 +198,7 @@ class MLTraining(MLTrainingTask):
         return model
 
     def get_data(self, dataset=None, output_y=True, output_df=False, nfiles=-1, min_puppi_pt=-1,
-            remove_saturated=False):
+            remove_saturated=False, useEmu=None, compute_mjjjj=True):
         import utils.tools as tools
 
         if not dataset:
@@ -204,7 +208,8 @@ class MLTraining(MLTrainingTask):
         inputs = feature_params.get("inputs", [])
         inputSums = feature_params.get("inputSums", [])
         nObj = feature_params.get("nObj", 4)
-        useEmu = feature_params.get("useEmu", False)
+        if useEmu == None:
+            useEmu = feature_params.get("useEmu", False)
         useMP = feature_params.get("useMP", False)
         keepStruct = feature_params.get("keepStruct", False)
 
@@ -228,9 +233,18 @@ class MLTraining(MLTrainingTask):
             df = tools.makeDataframe(collections, None, nObj, keepStruct)
 
             if remove_saturated:
+
                 df, puppiMET_noMu = tools.remove_saturated(df, puppiMET_noMu)
 
             return df.copy(), puppiMETNoMu_df.copy()
+
+            
+            if compute_mjjjj:
+                #compute_mjjjj = feature_params.get('compute_mjjjj', True)
+                print('tools.compute_mjjjj:', tools.compute_mjjjj)
+                #df, puppiMET_noMu = tools.compute_mjjjj(df, puppiMET_noMu)
+            #return df.copy(), puppiMETNoMu_df.copy()
+
         else:
             collections = tools.getCollections(data, inputSums, inputs)
             df = tools.makeDataframe(collections, None, nObj, keepStruct)
@@ -240,15 +254,29 @@ class MLTraining(MLTrainingTask):
         from sklearn.preprocessing import StandardScaler
         import tensorflow as tf
         from matplotlib import pyplot as plt
+        import utils.tools as tools
 
         feature_params = self.config.training_feature_groups()[self.feature_tag]
-        scaleData = feature_params.get("scaleData", False)
+        scaleData = feature_params.get("scaleData", True)
         trainFrac = feature_params.get("trainFrac", 0.5)
         min_puppi_pt = feature_params.get("min_puppi_pt", -1)
         remove_saturated = feature_params.get("remove_saturated", False)
+        compute_mjjjj = feature_params.get("compute_mjjjj", True)
+        print('VALUE OF compute_mjjjj:', compute_mjjjj)
 
-        # X, Y = self.get_data(nfiles=-1, min_puppi_pt=min_puppi_pt)
-        X, Y = self.get_data(nfiles=200, min_puppi_pt=min_puppi_pt, remove_saturated=remove_saturated)
+        #X, Y = self.get_data(nfiles=1, min_puppi_pt=min_puppi_pt)
+        X, Y = self.get_data(nfiles=-1, min_puppi_pt=min_puppi_pt, remove_saturated=remove_saturated, compute_mjjjj = compute_mjjjj)
+
+        print('X Y shape before mjjjj:', X.shape, Y.shape)
+        print('featuresbefore mjjjj: ', X.columns)
+        X, Y = tools.compute_mjjjj(X, Y)
+        print('X Y shape after mjjjj:', X.shape, Y.shape)
+        print('features after mjjjj: ', X.columns)
+        if 'm_jjjj_sq' in list(X.columns):
+            print('succesfully calculated jet masses')
+        if 'm_jjjj_sq' not in list(X.columns):
+            print('failed to calculate jet masses')
+
 
         scaler = StandardScaler()
         if scaleData:
@@ -279,6 +307,7 @@ class MLTraining(MLTrainingTask):
             plt.xlabel('Epoch')
             plt.legend()
             plt.savefig(create_file_dir(self.output()["acc"].path))
+            print(create_file_dir(self.output()["loss"].path))
 
 
 
@@ -329,31 +358,35 @@ class MLTrainingWorkflow(MLTrainingWorkflowBase):
 
 class BaseValidationTask():
 
-    def output(self):
-        return {
-            "rate": self.local_target("rate_comparison.pdf"),
-            "x_rate": self.local_target("x_rate.npy"),
-            "y_rate": self.local_target("y_rate.npy"),
-            "resolution": self.local_target("resolution_comparison.pdf"),
-            "x_resolution": self.local_target("x_resolution.npy"),
-            "y_resolution": self.local_target("y_resolution.npy"),
-            "dist": self.local_target("distributions.pdf"),
-            "x_dist": self.local_target("x_distributions.pdf"),
-            "y_dist": self.local_target("y_distributions.pdf"),
-            "netmet_met": self.local_target(f"l1netmet_vs_l1met__puppimet_{self.puppi_met_cut}.pdf"),
-            "netmet_met_log": self.local_target(f"l1netmet_vs_l1met__puppimet_{self.puppi_met_cut}_log.pdf"),
-            "netmet_puppi": self.local_target(f"l1netmet_vs_puppimet__puppimet_{self.puppi_met_cut}.pdf"),
-            "netmet_puppi_log": self.local_target(f"l1netmet_vs_puppimet__puppimet_{self.puppi_met_cut}_log.pdf"),
-            "efficiency": self.local_target("efficiency.pdf"),
-            "x_efficiency": self.local_target("x_efficiency.npy"),
-            "y_efficiency": self.local_target("y_efficiency.npy"),
-            "y_error_efficiency": self.local_target("y_error_efficiency.npy"),
-            "netMET_thresh": self.local_target("netMET_thresh.txt"),
+    def get_output_postfix(self):
+        return ""
 
-            "json": self.local_target("plotting_data_.json")
+    def output(self):
+        postfix = self.get_output_postfix()
+        return {
+            "rate": self.local_target(f"rate_comparison{postfix}.pdf"),
+            "x_rate": self.local_target(f"x_rate{postfix}.npy"),
+            "y_rate": self.local_target(f"y_rate{postfix}.npy"),
+            "resolution": self.local_target(f"resolution_comparison{postfix}.pdf"),
+            "x_resolution": self.local_target(f"x_resolution{postfix}.npy"),
+            "y_resolution": self.local_target(f"y_resolution{postfix}.npy"),
+            "dist": self.local_target(f"distributions{postfix}.pdf"),
+            "x_dist": self.local_target(f"x_distributions{postfix}.pdf"),
+            "y_dist": self.local_target(f"y_distributions{postfix}.pdf"),
+            "netmet_met": self.local_target(f"l1netmet_vs_l1met__puppimet_{self.puppi_met_cut}{postfix}.pdf"),
+            "netmet_met_log": self.local_target(f"l1netmet_vs_l1met__puppimet_{self.puppi_met_cut}_log{postfix}.pdf"),
+            "netmet_puppi": self.local_target(f"l1netmet_vs_puppimet__puppimet_{self.puppi_met_cut}{postfix}.pdf"),
+            "netmet_puppi_log": self.local_target(f"l1netmet_vs_puppimet__puppimet_{self.puppi_met_cut}_log{postfix}.pdf"),
+            "efficiency": self.local_target(f"efficiency{postfix}.pdf"),
+            "x_efficiency": self.local_target(f"x_efficiency{postfix}.npy"),
+            "y_efficiency": self.local_target(f"y_efficiency{postfix}.npy"),
+            "y_error_efficiency": self.local_target(f"y_error_efficiency{postfix}.npy"),
+            "netMET_thresh": self.local_target(f"netMET_thresh{postfix}.txt"),
+
+            "json": self.local_target(f"plotting_data{postfix}.json")
         }
 
-    def get_performance_plots(self, X, Y, X_train, Y_train, Xp, Yp, Xp_bkg, Yp_bkg):
+    def get_performance_plots(self, X, Y, X_train, Y_train, Xp, Yp, Xp_bkg, Yp_bkg, X_bkg_ref=None):
         import utils.plotting as plotting
         from matplotlib import pyplot as plt
         from matplotlib.colors import LogNorm, NoNorm
@@ -365,15 +398,21 @@ class BaseValidationTask():
         ##################################
 
         l1NetMET_bkg = Yp_bkg.flatten()
-        l1MET_bkg = Xp_bkg['methf_0_pt']
+        # l1MET_bkg = Xp_bkg['methf_0_pt']
+        if type(X_bkg_ref) != None:
+            l1MET_bkg = Xp_bkg['methf_0_hwPt'] / 2.
+        else:
+            l1MET_bkg = X_bkg_ref['methf_0_hwPt'] / 2.
 
         ax = plt.subplot()
         # rate plots must be in bins of GeV
         xrange = [0, 200]
         bins = xrange[1]
 
-        rateHist = plt.hist(l1MET_bkg, bins=bins, range=xrange, histtype='step', label='L1 MET Rate', cumulative=-1, log=True)
-        rateHist_netMET = plt.hist(l1NetMET_bkg, bins=bins, range=xrange, histtype='step', label='L1 NET MET Rate', cumulative=-1, log=True)
+        rateHist = plt.hist(l1MET_bkg, bins=bins, range=xrange, histtype='step', label='L1 MET Rate', cumulative=-1, log=True,
+            weights=[1./l1MET_bkg.shape[0] for i in range(l1MET_bkg.shape[0])])
+        rateHist_netMET = plt.hist(l1NetMET_bkg, bins=bins, range=xrange, histtype='step', label='L1 NET MET Rate', cumulative=-1, log=True, 
+            weights=[1./l1NetMET_bkg.shape[0] for i in range(l1NetMET_bkg.shape[0])])
 
         with open(create_file_dir(self.output()["x_rate"].path), "wb+") as f:
             np.save(f, rateHist_netMET[1])
@@ -404,7 +443,7 @@ class BaseValidationTask():
         # MET Resolution #
         ##################
 
-        l1MET = X['methf_0_pt']
+        l1MET = X['methf_0_hwPt'] / 2
         l1NetMET = Yp.flatten()
         l1MET_test = l1MET.drop(X_train.index)
         puppiMETNoMu_df_test = Y.drop(X_train.index)
@@ -555,9 +594,9 @@ class BaseValidationTask():
 
 
 class MLValidation(BaseValidationTask, MLTraining):
-    background_dataset_name = luigi.Parameter(default="background", description="name of the "
-        "background dataset, default: background")
-    l1_met_threshold = luigi.IntParameter(default=50, description="value of the MET threshold, "
+    background_dataset_name = luigi.Parameter(default="background_nopum_new", description="name of the "
+        "background dataset, default: background_nopum_new")
+    l1_met_threshold = luigi.IntParameter(default=80, description="value of the MET threshold, "
         "default: 50")
     puppi_met_cut = luigi.IntParameter(default=0, description="minimum cut on the PuppiMET value, "
         "default: 0")
@@ -576,13 +615,17 @@ class MLValidation(BaseValidationTask, MLTraining):
         from matplotlib import pyplot as plt
         from matplotlib.colors import LogNorm, NoNorm
         import keras
+        import utils.tools as tools 
 
         feature_params = self.config.training_feature_groups()[self.feature_tag]
-        scaleData = feature_params.get("scaleData", False)
+        scaleData = feature_params.get("scaleData", True)
         trainFrac = feature_params.get("trainFrac", 0.5)
         remove_saturated = feature_params.get("remove_saturated", False)
+        #compute_mjjjj = feature_params.get("compute_mjjjj", False)
 
-        X, Y = self.get_data(nfiles=200, remove_saturated=remove_saturated)
+        X, Y = self.get_data(nfiles=-1, remove_saturated=remove_saturated)
+        X, Y = tools.compute_mjjjj(X, Y)
+        
 
         scaler = StandardScaler()
         if scaleData:
@@ -593,13 +636,16 @@ class MLValidation(BaseValidationTask, MLTraining):
 
         # predict values for efficiency
         modelFile = self.input()["model"].path
+        print(modelFile)
         Xp = X.drop(X_train.index)
         with tf.device(self.device):
             model = keras.models.load_model(modelFile)
+            print(model.summary())
             Yp = model.predict(Xp)
 
         # Background
         Xp_bkg, _ = self.get_data(self.background_dataset, nfiles=50, output_y=False)
+        Xp_bkg, _ = tools.compute_mjjjj(Xp_bkg, _)
         if scaleData:
             Xp_bkg[Xp_bkg.columns] = pd.DataFrame(scaler.fit_transform(Xp_bkg))
         with tf.device(self.device):
@@ -630,8 +676,8 @@ class BDTTrainingTask(ConfigTask):
         "the loss function, default: neg_mean_absolute_error")
     random_seed = luigi.IntParameter(default=1, description="random seed for weight "
         "initialization, 0 means non-deterministic, default: 1")
-    signal_dataset_name = luigi.Parameter(default="signal", description="name of the signal dataset, "
-        "default: signal")
+    signal_dataset_name = luigi.Parameter(default="signal_nopum_new", description="name of the signal dataset, "
+        "default: signal_nopum_new")
 
     training_id = luigi.IntParameter(default=law.NO_INT, description="when given, overwrite "
         "training parameters from the training with this branch in the training_workflow_file, "
@@ -724,15 +770,26 @@ class BDTTraining(BDTTrainingTask):
         return {
             "json": self.local_target("model.json"),
             "model": self.local_target("model.model"),
+            "loss": self.local_target("loss.pdf"),
         }
 
     def generate_model(self):
         import xgboost
-        return xgboost.XGBRegressor(objective=self.objective, n_estimators=self.n_estimators,
+        def custom_turnon_loss(y_pred, y_val):
+            grad = np.where(np.logical_or(y_val < 50, y_val > 180), (y_val-y_pred) ** 2, (y_val-y_pred) ** 4)
+            hess = np.where(np.logical_or(y_val < 50, y_val > 180), 2 * (y_val-y_pred), 4 * (y_val-y_pred) ** 3)
+            return grad, hess
+
+        objective = self.objective
+        if self.objective.startswith("custom"):
+            objective = eval(self.objective)
+
+        return xgboost.XGBRegressor(objective=objective, n_estimators=self.n_estimators,
             seed=self.random_seed, max_depth=self.max_depth)
 
     def run(self):
         from sklearn.preprocessing import StandardScaler
+        from matplotlib import pyplot as plt
 
         feature_params = self.config.training_feature_groups()[self.feature_tag]
         trainFrac = feature_params.get("trainFrac", 0.5)
@@ -740,21 +797,37 @@ class BDTTraining(BDTTrainingTask):
         min_puppi_pt = feature_params.get("min_puppi_pt", -1)
         remove_saturated = feature_params.get("remove_saturated", False)
 
-        print(remove_saturated)
-        X, Y = MLTraining.get_data(self, nfiles=2, min_puppi_pt=min_puppi_pt,
+        X, Y = MLTraining.get_data(self, nfiles=-1, min_puppi_pt=min_puppi_pt,
             remove_saturated=remove_saturated)
         # X, Y = MLTraining.get_data(self, nfiles=2)
 
         scaler = StandardScaler()
         if scaleData:
             X[X.columns] = pd.DataFrame(scaler.fit_transform(X))
-        X_train = X.sample(frac=trainFrac, random_state=3).dropna()
+        X_train_test = X.sample(frac=trainFrac, random_state=3).dropna()
+        # Y_train_test = Y.loc[X_train.index]
+        X_train = X_train_test.sample(frac=0.7, random_state=3).dropna()
         Y_train = Y.loc[X_train.index]
+        X_test = X_train_test.drop(X_train.index)
+        Y_test = Y.loc[X_test.index]
 
         model = self.generate_model()
-        history = model.fit(X_train, Y_train)
+        evalset = [(X_train, Y_train), (X_test, Y_test)]
+        model.fit(X_train, Y_train, eval_metric='rmse', eval_set=evalset)
+
+        # retrieve performance metrics
+        results = model.evals_result()
         model.save_model(create_file_dir(self.output()["json"].path))
         model.save_model(create_file_dir(self.output()["model"].path))
+
+        # loss plotting
+        plt.plot(results['validation_0']['rmse'], label="Train")
+        plt.plot(results['validation_1']['rmse'], label="Test")
+        plt.ylabel('rmse')
+        plt.xlabel('Epoch')
+        plt.legend()
+        plt.savefig(create_file_dir(self.output()["loss"].path))
+        plt.close()
 
 
 class BDTTrainingWorkflowBase(MLTrainingWorkflowBase):
@@ -773,8 +846,10 @@ class BDTTrainingWorkflow(BDTTrainingWorkflowBase):
 
 
 class BDTValidation(BaseValidationTask, BDTTraining):
-    background_dataset_name = luigi.Parameter(default="background", description="name of the "
-        "background dataset, default: background")
+    background_dataset_name = luigi.Parameter(default="background_nopum_new", description="name of the "
+        "background dataset, default: background_nopum_new")
+    reference_background_dataset_name = luigi.Parameter(default="", description="name of the "
+        "reference background dataset, default: none")
     l1_met_threshold = luigi.IntParameter(default=80, description="value of the MET threshold, "
         "default: 80")
     puppi_met_cut = luigi.IntParameter(default=0, description="minimum cut on the PuppiMET value, "
@@ -790,12 +865,14 @@ class BDTValidation(BaseValidationTask, BDTTraining):
     def run(self):
         from sklearn.preprocessing import StandardScaler
         import xgboost
+        from scipy.special import expit
 
         feature_params = self.config.training_feature_groups()[self.feature_tag]
         scaleData = feature_params.get("scaleData", False)
         trainFrac = feature_params.get("trainFrac", 0.5)
 
-        X, Y = MLTraining.get_data(self, nfiles=10)
+        # X, Y = MLTraining.get_data(self, nfiles=50)
+        X, Y = MLTraining.get_data(self, nfiles=-1)
         # X, Y = MLTraining.get_data(self, nfiles=2)
 
         scaler = StandardScaler()
@@ -813,14 +890,19 @@ class BDTValidation(BaseValidationTask, BDTTraining):
 
         Yp = model.predict(Xp)
 
-        Xp_bkg, _ = MLTraining.get_data(self, self.background_dataset, output_y=False, nfiles=50)
+        Xp_bkg, _ = MLTraining.get_data(self, self.background_dataset, output_y=False, nfiles=100)
         # Xp_bkg, _ = MLTraining.get_data(self, self.background_dataset, output_y=False, nfiles=1)
         if scaleData:
             Xp_bkg[Xp_bkg.columns] = pd.DataFrame(scaler.fit_transform(Xp_bkg))
 
         Yp_bkg = model.predict(Xp_bkg)
 
-        self.get_performance_plots(X, Y, X_train, Y_train, Xp, Yp, Xp_bkg, Yp_bkg)
+        X_bkg_ref = ""
+        if self.reference_background_dataset_name:
+            reference_background_dataset = self.config.datasets.get(self.reference_background_dataset_name)
+            X_bkg_ref, _ = MLTraining.get_data(self, reference_background_dataset, output_y=False, nfiles=100, useEmu=False)
+
+        self.get_performance_plots(X, Y, X_train, Y_train, Xp, Yp, Xp_bkg, Yp_bkg, X_bkg_ref)
 
 
 class BDTValidationWorkflow(BDTTrainingWorkflow):
@@ -1042,10 +1124,17 @@ class BaseComparisonTask():
                     x = np.load(f)
                 with open(vals[f'y_{plot}'].path, 'rb') as f:
                     y = np.load(f)
+                # if plot == "rate":
+                    # print(key)
+                    # print(y)
+                if plot == "resolution":
+                    y /= sum(y)
                 plt.stairs(y, x, label=f"Branch {key}")
             ax.set_xlabel(x_labels[plot])
             ax.set_ylabel('Events')
             plt.legend()
+            if plot == "rate":
+                plt.yscale('log')
             plt.savefig(create_file_dir(self.output()[plot].path))
             plt.close('all')
 
@@ -1062,6 +1151,8 @@ class BaseComparisonTask():
                 netMET_thresh = f.readlines()[0].strip()
             plt.errorbar(x, y, y_errors, label=f"Branch {key}, L1 NETMET > " + str(netMET_thresh),
                 marker='o', capsize=7, linestyle='none')
+            print(key)
+            print(y)
         ax.set_xlabel('PUPPI MET No Mu [GeV]')
         ax.set_ylabel('Efficiency')
         plt.legend()
@@ -1082,3 +1173,5 @@ class MLComparison(BaseComparisonTask, MLValidation):
 class BDTComparison(BaseComparisonTask, BDTValidation):
     def requires(self):
         return BDTValidationWorkflow.vreq(self)
+
+
